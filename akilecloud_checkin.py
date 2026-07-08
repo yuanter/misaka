@@ -23,10 +23,20 @@ import json, os
 import time
 from sys import stdout
 import random
-import cloudscraper
 from datetime import datetime
 import logging
 import sys
+try:
+    import cloudscraper
+except Exception:
+    print(f"❌未安装 cloudscraper 依赖!!!")
+    exit(0)
+try:
+    import sqlite3
+except Exception:
+    print(f"❌未安装 sqlite3 依赖!!!")
+    exit(0)
+
 
 
 # 加载通知
@@ -96,22 +106,106 @@ def wxpusher(title: str, content: str) -> None:
 
 ql_auth_path = '/ql/data/config/auth.json'
 ql_config_path = '/ql/data/config/config.sh'
+ql_token_path = '/ql/data/config/token.json'
+# 2.20.2之前的版本
+ql_url = 'http://localhost:5600'
+# 2.20.2之后的版本
+# 1. 设置数据库路径 (如果是青龙容器内运行，通常是这个路径)
+DB_PATH = '/ql/data/db/keyv.sqlite'
+
 #判断环境变量
 flag = 'new'
-if not os.path.exists(ql_auth_path):
-    ql_auth_path = '/ql/config/auth.json'
-    ql_config_path = '/ql/config/config.sh'
-    if not os.path.exists(ql_config_path):
-        ql_config_path = '/ql/config/config.js'
-    flag = 'old'
-# ql_auth_path = r'D:\Docker\ql\config\auth.json'
-ql_url = 'http://localhost:5600'
+
+if not os.path.exists(DB_PATH):
+    if not os.path.exists(ql_auth_path):
+        ql_config_path = '/ql/config/config.sh'
+        ql_auth_path = '/ql/config/auth.json'
+        if not os.path.exists(ql_config_path):
+            ql_config_path = '/ql/config/config.js'
+        flag = 'old'
+else:
+    ql_url = 'http://localhost:5700'
+
+
+
+# 1. 设置数据库路径 (如果是青龙容器内运行，通常是这个路径)
+# DB_PATH = '/ql/data/db/keyv.sqlite'
+
+def query_keyv_db():
+    if not os.path.exists(DB_PATH):
+        print_now(f"❌ 错误: 找不到数据库文件 -> {DB_PATH}")
+        print_now("请确认路径是否正确，或者是否已将该文件映射/拷贝到了当前目录。")
+        return
+
+    # print_now(f"🔗 正在连接数据库: {DB_PATH}")
+    # print_now(f"🔗 正在连接数据库")
+    
+    try:
+        # 2. 连接数据库 (设置 timeout=5，防止青龙后端正在高频读写导致 database is locked)
+        with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+            cursor = conn.cursor()
+
+            # 3. 执行 SQL 查询语句
+            # keyv 的表名固定为 "keyv"，核心字段为 "key" 和 "value"
+            cursor.execute("SELECT key, value FROM keyv")
+            rows = cursor.fetchall()
+
+            if not rows:
+                print_now("⚠️ 数据库连接成功，但表 'keyv' 中没有任何数据。")
+                return
+
+            # print_now(f"✅ 查询成功，共找到 {len(rows)} 条记录:\n")
+            # print_now("=" * 60)
+
+            # 4. 遍历并格式化输出数据
+            for key, raw_value in rows:
+                # print_now(f"🔑 [Key]: {key}")
+                if key == "keyv:authInfo":
+                    # keyv 库在存入 value 时，通常会将其序列化为 JSON 字符串
+                    try:
+                        # 尝试解析为字典
+                        parsed_value = json.loads(raw_value)
+                        value = parsed_value.get("value")
+                        token = value.get("token")
+                        # # 格式化输出 JSON，使其具备良好的可读性
+                        # print_now("📦 [Value] (JSON 格式):")
+                        # print_now(json.dumps(parsed_value, indent=4, ensure_ascii=False))
+                        
+                        # 附加功能：提取出 Token 过期时间或封禁状态
+                        if isinstance(parsed_value, dict) and 'expires' in parsed_value:
+                            expires_ts = parsed_value.get('expires')
+                            if expires_ts:
+                                print_now(f"⏱️  [过期时间戳]: {expires_ts}")
+                        return token        
+                    except json.JSONDecodeError:
+                        # 如果解析失败，说明存储的是纯文本或其他格式，直接输出
+                        # print_now(f"📄 [Value] (纯文本格式):\n{raw_value}")
+                        print_now(f"🔗 数据库解析失败")
+                    
+                # print_now("-" * 60)
+
+
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            print_now("❌ 错误: 数据库中不存在 'keyv' 表。这可能不是由 keyv 生成的库。")
+        elif "locked" in str(e).lower():
+            print_now("❌ 错误: 数据库被锁定 (Database is locked)。青龙后端可能正在进行写入操作，请稍后再试。")
+        else:
+            print_now(f"❌ SQLite 运行错误: {e}")
+    except Exception as e:
+        print_now(f"❌ 发生未知异常: {e}")
+
 
 
 def __get_token() -> str or None:
-    with open(ql_auth_path, 'r', encoding='utf-8') as f:
-        j_data = json.load(f)
-    return j_data.get('token')
+    
+    if os.path.exists(DB_PATH):
+        # 执行查询
+        return query_keyv_db()
+    else:
+        with open(ql_auth_path, 'r', encoding='utf-8') as f:
+            j_data = json.load(f)
+        return j_data.get('token')
 
 
 def __get__headers() -> dict:
